@@ -43,7 +43,7 @@ END_DATE = datetime.now(timezone.utc)
 
 # arXiv categories to restrict to (hep-ph, hep-ex, hep-th, nucl-th, nucl-ex).
 # Set to None to search all categories.
-CATEGORIES = ["hep-ph", "hep-ex", "hep-th", "nucl-th", "nucl-ex"]
+CATEGORIES = ["hep-ph", "hep-ex"]
 
 API_URL = "http://export.arxiv.org/api/query"
 BATCH_SIZE = 100          # max 2000, but smaller batches are gentler
