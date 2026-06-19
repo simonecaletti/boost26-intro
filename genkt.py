@@ -843,7 +843,7 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
         terms    = ", ".join(jr["top_terms"]) if jr["top_terms"] else f"J{rank}"
 
         cluster_handles.append(
-            mpatches.Patch(color=col, alpha=0.7,
+            mpatches.Patch(facecolor="white", edgecolor=col, linewidth=2,
                            label=f"J{rank}  [{terms}]  (n={len(kept_idx)})")
         )
 
@@ -879,6 +879,15 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
                            s=22, color=sc, alpha=0.90, zorder=4)
                 cluster_handles.append(mpatches.Patch(color=sc, label=lbl))
 
+                # Sub-jet letter label at centroid
+                scx    = xy_all[sidx, 0].mean()
+                scy    = xy_all[sidx, 1].mean()
+                letter = chr(ord('a') + si)
+                ax.text(scx, scy, letter, fontsize=7, fontweight="bold",
+                        ha="center", va="center", color=sc,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.75,
+                                  ec=sc, lw=0.8), zorder=6)
+
                 # Dashed convex hull for this sub-jet
                 pts_sj = xy_all[sidx]
                 if len(pts_sj) >= 3:
@@ -904,13 +913,13 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
                 ax.scatter(xy_all[noise_idx, 0], xy_all[noise_idx, 1],
                            s=10, color=col, alpha=0.25, zorder=3)
 
-        # Centroid label
+        # Centroid label — jet number only, no terms
         cx = xy_all[kept_idx, 0].mean()
         cy = xy_all[kept_idx, 1].mean()
-        ax.text(cx, cy, f"J{rank}\n{terms}", fontsize=7.5, fontweight="bold",
-                ha="center", va="center", color=col, multialignment="center",
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.75,
-                          ec=col, lw=1.2))
+        ax.text(cx, cy, f"J{rank}", fontsize=9, fontweight="bold",
+                ha="center", va="center", color=col,
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85,
+                          ec=col, lw=1.5), zorder=7)
 
     # 4. Highlighted papers — drawn on top
     markers = ["*", "D", "^", "P", "X"]
