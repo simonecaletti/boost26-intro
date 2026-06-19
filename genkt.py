@@ -1003,6 +1003,12 @@ def main():
         REUSE_UMAP = False
     CLUSTERING_METHOD = args.clustering
 
+    import shutil
+    clusters_dir = os.path.join(OUTPUT_DIR, "clusters")
+    if os.path.isdir(clusters_dir):
+        shutil.rmtree(clusters_dir)
+        print(f"[Setup] Cleared {clusters_dir}")
+
     print(f"Config: p={P_EXPONENT}  R_jet={R_JET}  R_sub={R_SUB}  "
           f"z_cut={Z_CUT}  beta={BETA}  N_jets={N_PLOT_JETS}  "
           f"min_jet={MIN_JET_PAPERS}  n_sub_min={N_SUB_MIN}")
