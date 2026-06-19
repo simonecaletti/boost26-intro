@@ -145,7 +145,8 @@ EXTRA_STOPWORDS = [
     "mathcal", "tensor", "hat", "system", "flow", "pm", "s_", "dimension",
     "k_t", "II", "ll", "molière", "systems", "color", "corrections", "nlo",
     "nnlo", "qcd", "sm", "self", "text", "pm", "syst", "rm", "nn", "13",
-    "aa", "v_2", "fb", "sqrt", "lt", "stat"
+    "aa", "v_2", "fb", "sqrt", "lt", "stat", "production", "integrals", 
+    "scheme", "power"
 ]
 
 # ---------------------------------------------------------------------------
@@ -803,11 +804,16 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
     n_jets  = len(jet_results)
     palette = _jet_colors(n_jets)
 
-    # Identify beam remnants (papers not in any raw jet)
-    beam_idx = np.array([i for i in range(len(df_full))
-                         if i not in all_raw_indices], dtype=int)
+    # Papers kept in any plotted jet (will be colored)
+    colored_idx = set()
+    for jr in jet_results:
+        colored_idx.update(jr["kept_idx"].tolist())
 
-    # Collect all SoftDrop-groomed-out indices across jets
+    # All papers NOT in any plotted jet's kept set (background layer)
+    bg_idx = np.array([i for i in range(len(df_full))
+                       if i not in colored_idx], dtype=int)
+
+    # Subset of background that was SoftDrop-groomed out of a plotted jet
     all_dropped = set()
     for jr in jet_results:
         all_dropped.update(jr["dropped_idx"].tolist())
@@ -819,20 +825,23 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
     cluster_handles   = []
     highlight_handles = []
 
-    # 1. Beam remnants — very light grey (smallest, drawn first)
-    if len(beam_idx) > 0:
-        ax.scatter(xy_all[beam_idx, 0], xy_all[beam_idx, 1],
-                   s=5, color="#e0e0e0", alpha=0.35, zorder=1)
+    # 1. All non-jet papers — lightest grey (entire background visible)
+    n_bg = len(bg_idx)
+    if n_bg > 0:
+        ax.scatter(xy_all[bg_idx, 0], xy_all[bg_idx, 1],
+                   s=5, color="#ebebeb", alpha=0.45, zorder=1)
+    cluster_handles.append(
+        mpatches.Patch(color="#ebebeb",
+                       label=f"non-clustered  (n={n_bg - len(dropped_arr)})")
+    )
 
-    # 2. SoftDrop-groomed papers — light grey
+    # 2. SoftDrop-groomed papers — slightly darker grey (were in a jet, removed)
     if len(dropped_arr) > 0:
         ax.scatter(xy_all[dropped_arr, 0], xy_all[dropped_arr, 1],
-                   s=8, color="#cccccc", alpha=0.55, zorder=1)
-
-    total_soft = len(beam_idx) + len(dropped_arr)
+                   s=7, color="#b0b0b0", alpha=0.60, zorder=2)
     cluster_handles.append(
-        mpatches.Patch(color="#cccccc",
-                       label=f"groomed / beam remnants  (n={total_soft})")
+        mpatches.Patch(color="#b0b0b0",
+                       label=f"SoftDrop groomed  (n={len(dropped_arr)})")
     )
 
     # 3. Jet hulls + leaf dots + sub-jet dashed hulls + legend entries
@@ -957,8 +966,12 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
                       f"SoftDrop  z_cut={Z_CUT}  β={BETA}   |   "
                       f"sub-jet  R={R_SUB}")
     ax.set_title(plot_title, fontsize=11)
-    ax.set_xlabel("UMAP-1")
-    ax.set_ylabel("UMAP-2")
+    ax.set_xlim(0, 2 * np.pi)
+    ax.set_ylim(-2.5, 2.5)
+    ax.set_xticks([0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi])
+    ax.set_xticklabels(["$0$", r"$\pi/2$", r"$\pi$", r"$3\pi/2$", r"$2\pi$"])
+    ax.set_xlabel(r"$\phi$ (UMAP-1)", fontsize=11)
+    ax.set_ylabel(r"$\eta$ (UMAP-2)", fontsize=11)
     fig.tight_layout()
     path = out("final_clustering.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -1029,6 +1042,11 @@ def main():
         umap_out["pt"]     = pts
         umap_out.to_csv(umap_path, index=False)
         print(f"[UMAP] Coordinates saved → {umap_path}")
+
+    # Rescale to collider-physics axes: φ ∈ [0, 2π] and η ∈ [−2.5, 2.5]
+    xs     = (xs - xs.min()) / (xs.max() - xs.min()) * 2 * np.pi
+    ys     = (ys - ys.min()) / (ys.max() - ys.min()) * 5.0 - 2.5
+    xy_all = np.column_stack([xs, ys])
 
     if CLUSTERING_METHOD == "genkt":
         # =====================================================================
