@@ -51,7 +51,7 @@ MIN_JET_PAPERS   = 8     # discard jets smaller than this after grooming
 # z_cut=0.15 with beta=0 (mass-drop-like) aggressively drops low-pt papers;
 # beta=1 is softer grooming — keep at 0.1 to preserve borderline papers.
 Z_CUT            = 0.3
-BETA             = 0.0   # beta=0: pure z-cut (mass-drop grooming), angle-independent
+BETA             = -1.0   # beta=0: pure z-cut (mass-drop grooming), angle-independent
 
 # Minimum pt (avoids zero/negative issues in the clustering distances)
 PT_EPSILON       = 0.1
@@ -791,6 +791,20 @@ def main():
         jet_csv["umap_y"] = ys[jr["kept_idx"]]
         jet_csv["pt"]     = pts[jr["kept_idx"]]
         jet_csv.to_csv(cout(f"J{rank}.csv"), index=False)
+
+    # Save all groomed-out papers (SoftDrop drops + beam remnants) to one CSV
+    all_dropped = set()
+    for jr in jet_results:
+        all_dropped.update(jr["dropped_idx"].tolist())
+    beam_idx = [i for i in range(len(df_full)) if i not in all_raw_indices]
+    groomed_idx = np.array(sorted(all_dropped) + beam_idx, dtype=int)
+    groomed_csv = df_full.iloc[groomed_idx].copy()
+    groomed_csv["umap_x"] = xs[groomed_idx]
+    groomed_csv["umap_y"] = ys[groomed_idx]
+    groomed_csv["pt"]     = pts[groomed_idx]
+    groomed_path = out("groomed_papers.csv")
+    groomed_csv.to_csv(groomed_path, index=False)
+    print(f"  Groomed / beam-remnant papers ({len(groomed_idx)}) → {groomed_path}")
 
     # =========================================================================
     # PASS 3 — sub-clustering within each top jet  (R = R_SUB)
