@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ---------------------------------------------------------------------------
 INPUT_CSV         = "arxiv_jet_papers.csv"
-OUTPUT_DIR        = "output"
+OUTPUT_DIR        = "output_bert"
 CLUSTERS_DIR      = os.path.join(OUTPUT_DIR, "clusters")
 
 EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
