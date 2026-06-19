@@ -146,7 +146,9 @@ EXTRA_STOPWORDS = [
     "k_t", "II", "ll", "molière", "systems", "color", "corrections", "nlo",
     "nnlo", "qcd", "sm", "self", "text", "pm", "syst", "rm", "nn", "13",
     "aa", "v_2", "fb", "sqrt", "lt", "stat", "production", "integrals", 
-    "scheme", "power"
+    "scheme", "power", "p_t", "coefficients", "tmd", "gev", "mev", "parton",
+    "boson", "pp", "cross", "section", "rightarrow", "lepton", "lhc", "σ_",
+    "atlas", "cms", "alice", "lhc-b",
 ]
 
 # ---------------------------------------------------------------------------
