@@ -22,7 +22,7 @@ Usage:
     python topic_clustering.py
 """
 
-import sys, os, warnings
+import sys, os, warnings, argparse
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,10 @@ ONTOPIC_KEYWORDS = [
     "jet", "jets", "qcd", "lund", "quark", "gluon", "parton", "shower",
     "fragmentation", "substructure", "splitting", "collider", "lhc",
     "transverse momentum", "rapidity", "fastjet",
+    # Monte Carlo / event generator cluster
+    "monte carlo", "event generator", "pythia", "herwig", "sherpa",
+    "powheg", "madgraph", "parton shower", "dipole shower", "nlo matching",
+    "matrix element", "merging", "meps",
     # ML / tagging cluster
     "neural network", "deep learning", "machine learning", "transformer",
     "graph neural", "graph network", "bdt", "boosted decision", "autoencoder",
@@ -93,15 +97,20 @@ ONTOPIC_KEYWORDS = [
 
 OFFTOPIC_KEYWORDS = [
     # Cosmology / BSM unrelated to jets
-    "dark matter", "inflation", "inflaton", "reheating",
+    "dark matter", "dark photon", "dark sector", "wimp", "axion-like",
+    "inflation", "inflaton", "reheating", "de sitter", "cosmological constant",
     "gravitational wave", "string theory", "moduli", "ads/cft",
     "conformal field", "bootstrap", "axion", "cosmological",
-    # Heavy-ion / QGP (remove next two lines if you want this as a cluster)
+    "supersymmetry", "susy", "neutralino", "gravitino", "sparticle",
+    # Heavy-ion / QGP
     "quark-gluon plasma", "qgp", "jet quenching", "heavy-ion",
-    "quenching weight", "nuclear modification",
-    # extra 
-    "majorana", "hyperons", "instantons", "ray", "reheating", 
-    "inflation", "inflaton",
+    "quenching weight", "nuclear modification", "glasma",
+    "quark gluon plasma", "hydrodynamic", "elliptic flow",
+    "centrality", "pb-pb", "aa collisions", "nucleus-nucleus",
+    # Unrelated QFT / conformal
+    "ads/cft", "holographic", "anti-de sitter",
+    "thermal field", "imaginary time", "finite temperature",
+    "majorana", "hyperons", "instantons",
 ]
 
 # Seed colors — extended automatically via golden-ratio HSV wheel
@@ -136,11 +145,29 @@ EXTRA_STOPWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="Jet-physics-inspired topic clustering on arXiv papers.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--p",            type=float, default=P_EXPONENT,   dest="p_exponent",
+                   help="gen-kt exponent: 0=C/A, 1=kt, -1=anti-kt")
+    p.add_argument("--r-jet",        type=float, default=R_JET,        help="Pass-1 jet radius")
+    p.add_argument("--r-sub",        type=float, default=R_SUB,        help="Pass-3 sub-jet radius")
+    p.add_argument("--min-jet",      type=int,   default=MIN_JET_PAPERS, help="Min papers per jet after grooming")
+    p.add_argument("--z-cut",        type=float, default=Z_CUT,        help="SoftDrop z_cut")
+    p.add_argument("--beta",         type=float, default=BETA,         help="SoftDrop beta")
+    p.add_argument("--n-jets",       type=int,   default=N_PLOT_JETS,  help="Top N jets to plot/sub-cluster")
+    p.add_argument("--n-label",      type=int,   default=N_LABEL_TERMS, help="TF-IDF terms per label")
+    p.add_argument("--n-sub-min",    type=int,   default=N_SUB_MIN,    help="Min papers per sub-jet")
+    p.add_argument("--output-dir",   type=str,   default=OUTPUT_DIR,   help="Output directory")
+    p.add_argument("--no-reuse-umap", action="store_true",             help="Force UMAP recomputation")
+    return p.parse_args()
+
+
 import pandas as pd
 import numpy as np
-
-
-CLUSTERS_DIR = os.path.join(OUTPUT_DIR, "clusters")
 
 
 def out(filename):
@@ -149,8 +176,9 @@ def out(filename):
 
 
 def cout(filename):
-    os.makedirs(CLUSTERS_DIR, exist_ok=True)
-    return os.path.join(CLUSTERS_DIR, filename)
+    clusters_dir = os.path.join(OUTPUT_DIR, "clusters")
+    os.makedirs(clusters_dir, exist_ok=True)
+    return os.path.join(clusters_dir, filename)
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +746,27 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices):
 # ---------------------------------------------------------------------------
 
 def main():
+    global P_EXPONENT, R_JET, R_SUB, MIN_JET_PAPERS, Z_CUT, BETA
+    global N_PLOT_JETS, N_LABEL_TERMS, N_SUB_MIN, OUTPUT_DIR, REUSE_UMAP
+
+    args = _parse_args()
+    P_EXPONENT    = args.p_exponent
+    R_JET         = args.r_jet
+    R_SUB         = args.r_sub
+    MIN_JET_PAPERS = args.min_jet
+    Z_CUT         = args.z_cut
+    BETA          = args.beta
+    N_PLOT_JETS   = args.n_jets
+    N_LABEL_TERMS = args.n_label
+    N_SUB_MIN     = args.n_sub_min
+    OUTPUT_DIR    = args.output_dir
+    if args.no_reuse_umap:
+        REUSE_UMAP = False
+
+    print(f"Config: p={P_EXPONENT}  R_jet={R_JET}  R_sub={R_SUB}  "
+          f"z_cut={Z_CUT}  beta={BETA}  N_jets={N_PLOT_JETS}  "
+          f"min_jet={MIN_JET_PAPERS}  n_sub_min={N_SUB_MIN}")
+
     df_full = load_corpus(INPUT_CSV)
 
     # --- pt (keyword score) ---
