@@ -37,7 +37,8 @@ OUTPUT_DIR       = "output_genkt"
 # Set to False (or delete umap_coords.csv) to force a full recomputation.
 REUSE_UMAP       = True
 
-EMBEDDING_MODEL  = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL  = "allenai/specter2_base"
+CLUSTERING_METHOD = "genkt"
 
 # Generalized-kt exponent: p=0 → C/A, p=1 → kt, p=-1 → anti-kt
 # anti-kt (p=-1) builds jets outward from the hardest (most on-topic) papers,
@@ -56,7 +57,7 @@ BETA             = 2.0   # beta=0: pure z-cut (mass-drop grooming), angle-indepe
 # Minimum pt (avoids zero/negative issues in the clustering distances)
 PT_EPSILON       = 0.1
 
-N_PLOT_JETS      = 7     # how many jets to plot AND sub-cluster (top N by size)
+N_PLOT_JETS      = 5     # how many jets to plot AND sub-cluster (top N by size)
 N_LABEL_TERMS    = 3     # TF-IDF terms shown as jet/sub-jet label
 N_SUB_MIN        = 3     # minimum papers per sub-jet to keep it
 
@@ -141,7 +142,10 @@ EXTRA_STOPWORDS = [
     "scriptscriptstyle", "_s rightarrow", "pm0", "d_s", "p_", "tev",
     "jet", "twist", "soft", "tau", "bar", "leading", "jets", "gluon",
     "proton", "quark", "density", "densities","collisions", "ell", 
-    "mathcal", "tensor", "hat", "system", "flow"
+    "mathcal", "tensor", "hat", "system", "flow", "pm", "s_", "dimension",
+    "k_t", "II", "ll", "molière", "systems", "color", "corrections", "nlo",
+    "nnlo", "qcd", "sm", "self", "text", "pm", "syst", "rm", "nn", "13",
+    "aa", "v_2", "fb", "sqrt", "lt", "stat"
 ]
 
 # ---------------------------------------------------------------------------
@@ -163,6 +167,9 @@ def _parse_args():
     p.add_argument("--n-sub-min",    type=int,   default=N_SUB_MIN,    help="Min papers per sub-jet")
     p.add_argument("--output-dir",   type=str,   default=OUTPUT_DIR,   help="Output directory")
     p.add_argument("--no-reuse-umap", action="store_true",             help="Force UMAP recomputation")
+    p.add_argument("--clustering",    type=str,   default="genkt",
+               choices=["genkt", "agglomerative", "nmf"],
+               help="Clustering algorithm: genkt (jet-physics), agglomerative, or nmf")
     return p.parse_args()
 
 
@@ -512,6 +519,212 @@ def extract_discriminative_labels(groups_df, n=N_LABEL_TERMS):
 
 
 # ---------------------------------------------------------------------------
+# Alternative clustering pipelines (agglomerative / NMF)
+# ---------------------------------------------------------------------------
+
+def _build_jet_results_from_labels(df_full, xy_all, pts, labels, n_jets):
+    """
+    Convert flat cluster labels (−1 = ungrouped) into the jet_results format
+    expected by final_plot().  Handles sub-clustering internally using the
+    same algorithm (agglomerative on 2-D UMAP).
+    Used by run_agglomerative_pipeline().
+    """
+    from sklearn.cluster import AgglomerativeClustering
+    from collections import Counter
+
+    counts  = Counter(l for l in labels if l >= 0)
+    valid   = sorted(counts, key=lambda c: -counts[c])
+    valid   = [c for c in valid if counts[c] >= MIN_JET_PAPERS][:n_jets]
+
+    all_raw_indices = set(np.where(labels >= 0)[0].tolist())
+    jet_results     = []
+
+    for rank, cid in enumerate(valid):
+        idx = np.where(labels == cid)[0]
+        jet_results.append({
+            "all_idx":     idx,
+            "kept_idx":    idx,
+            "dropped_idx": np.array([], dtype=int),
+            "top_terms":   [],
+            "sub_jets":    [],
+            "jet_idx":     rank,
+        })
+
+    jet_dfs   = [df_full.iloc[jr["kept_idx"]].reset_index(drop=True) for jr in jet_results]
+    jet_terms = extract_discriminative_labels(jet_dfs)
+    for jr, terms in zip(jet_results, jet_terms):
+        jr["top_terms"] = terms
+
+    for jr in jet_results:
+        kidx = jr["kept_idx"]
+        rank = jr["jet_idx"]
+        n_sub = max(2, min(N_PLOT_JETS, len(kidx) // 10))
+        if len(kidx) < N_SUB_MIN * n_sub:
+            continue
+        sub_labels = AgglomerativeClustering(
+            n_clusters=n_sub, metric="euclidean", linkage="ward"
+        ).fit_predict(xy_all[kidx])
+
+        sub_entries = []
+        for si in range(n_sub):
+            mask = np.where(sub_labels == si)[0]
+            if len(mask) < N_SUB_MIN:
+                continue
+            sub_entries.append({"label": f"J{rank}{chr(ord('a') + si)}",
+                                 "idx":   kidx[mask]})
+        if len(sub_entries) < 2:
+            continue
+
+        sub_dfs   = [df_full.iloc[e["idx"]].reset_index(drop=True) for e in sub_entries]
+        sub_terms = extract_discriminative_labels(sub_dfs)
+        for entry, sterms in zip(sub_entries, sub_terms):
+            entry["top_terms"] = sterms
+            jr["sub_jets"].append(entry)
+            sjet_csv = df_full.iloc[entry["idx"]].copy()
+            sjet_csv["umap_x"] = xy_all[entry["idx"], 0]
+            sjet_csv["umap_y"] = xy_all[entry["idx"], 1]
+            sjet_csv["pt"]     = pts[entry["idx"]]
+            sjet_csv.to_csv(cout(f"{entry['label']}.csv"), index=False)
+
+        print(f"  J{rank}: {len(jr['sub_jets'])} sub-clusters")
+        for e in jr["sub_jets"]:
+            print(f"    {e['label']}: n={len(e['idx'])}  [{', '.join(e['top_terms'])}]")
+
+    return jet_results, all_raw_indices
+
+
+def run_agglomerative_pipeline(df_full, xy_all, pts):
+    """
+    Pass 1: AgglomerativeClustering on 2-D UMAP coordinates.
+    No SoftDrop grooming — small clusters become beam remnants.
+    Pass 3: AgglomerativeClustering sub-clustering within each jet.
+    Returns (jet_results, all_raw_indices).
+    """
+    from sklearn.cluster import AgglomerativeClustering
+
+    n_clusters = min(N_PLOT_JETS + 4, len(df_full) - 1)
+    print(f"\n[Agglomerative] Clustering {len(df_full)} papers into "
+          f"{n_clusters} clusters on 2-D UMAP ...")
+    labels = AgglomerativeClustering(
+        n_clusters=n_clusters, metric="euclidean", linkage="ward"
+    ).fit_predict(xy_all)
+
+    jet_results, all_raw_indices = _build_jet_results_from_labels(
+        df_full, xy_all, pts, labels, N_PLOT_JETS
+    )
+    print(f"  → {len(jet_results)} jets")
+    for jr in jet_results:
+        print(f"    J{jr['jet_idx']}: n={len(jr['kept_idx'])}  "
+              f"[{', '.join(jr['top_terms'])}]")
+    return jet_results, all_raw_indices
+
+
+def run_nmf_pipeline(df_full, xy_all, pts):
+    """
+    Pass 1: NMF on TF-IDF matrix.  Papers in the lowest-weight percentile
+            (GROOM_PERCENTILE) are treated as 'groomed' (low-confidence).
+    Pass 3: NMF sub-topics within each jet, using a separate TF-IDF fit.
+    Returns (jet_results, all_raw_indices).
+    """
+    from sklearn.decomposition import NMF
+    from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+
+    GROOM_PERCENTILE = 15   # bottom 15% by max-component weight → groomed
+
+    sw   = list(ENGLISH_STOP_WORDS) + EXTRA_STOPWORDS
+    docs = df_full["text"].tolist()
+    vec  = TfidfVectorizer(stop_words=sw, ngram_range=(1, 2),
+                           max_features=5000, min_df=2)
+    X    = vec.fit_transform(docs)
+    n    = max(2, min(N_PLOT_JETS + 4, X.shape[0] - 1, X.shape[1] - 1))
+
+    print(f"\n[NMF] Decomposing {len(docs)} papers into {n} components ...")
+    nmf  = NMF(n_components=n, random_state=42, max_iter=500)
+    W    = nmf.fit_transform(X)
+    H    = nmf.components_
+    fn   = vec.get_feature_names_out()
+
+    max_w       = W.max(axis=1)
+    threshold   = float(np.percentile(max_w, GROOM_PERCENTILE))
+    assignments = W.argmax(axis=1)
+    print(f"[NMF] weight range {max_w.min():.3f}–{max_w.max():.3f}, "
+          f"groom threshold={threshold:.3f}")
+
+    comp_data = []
+    for cid in range(n):
+        mask_all  = np.where(assignments == cid)[0]
+        mask_kept = np.where((assignments == cid) & (max_w > threshold))[0]
+        if len(mask_kept) >= MIN_JET_PAPERS:
+            comp_data.append((cid, mask_all, mask_kept))
+    comp_data.sort(key=lambda x: -len(x[2]))
+    comp_data = comp_data[:N_PLOT_JETS]
+
+    all_raw_indices = set()
+    jet_results     = []
+    for rank, (cid, mask_all, mask_kept) in enumerate(comp_data):
+        all_raw_indices.update(mask_all.tolist())
+        top_idx   = H[cid].argsort()[::-1][:N_LABEL_TERMS]
+        top_terms = [fn[i] for i in top_idx]
+        jet_results.append({
+            "all_idx":     mask_all,
+            "kept_idx":    mask_kept,
+            "dropped_idx": np.setdiff1d(mask_all, mask_kept),
+            "top_terms":   top_terms,
+            "sub_jets":    [],
+            "jet_idx":     rank,
+        })
+
+    print(f"  → {len(jet_results)} jets survive threshold + size filter")
+    for jr in jet_results:
+        print(f"    J{jr['jet_idx']}: n={len(jr['kept_idx'])}  "
+              f"[{', '.join(jr['top_terms'])}]")
+
+    # Sub-topics via NMF within each jet
+    for jr in jet_results:
+        kidx = jr["kept_idx"]
+        rank = jr["jet_idx"]
+        if len(kidx) < N_SUB_MIN * 4:
+            continue
+        sub_docs = df_full.iloc[kidx]["text"].tolist()
+        n_sub    = max(2, min(N_PLOT_JETS, len(kidx) // 15))
+        vec_sub  = TfidfVectorizer(stop_words=sw, ngram_range=(1, 2),
+                                   max_features=2000, min_df=1)
+        Xs = vec_sub.fit_transform(sub_docs)
+        if Xs.shape[1] < n_sub:
+            continue
+        nmf_sub  = NMF(n_components=n_sub, random_state=42, max_iter=400)
+        Ws       = nmf_sub.fit_transform(Xs)
+        sub_asgn = Ws.argmax(axis=1)
+        fn_sub   = vec_sub.get_feature_names_out()
+        Hs       = nmf_sub.components_
+
+        sub_entries = []
+        for si in range(n_sub):
+            local_mask = np.where(sub_asgn == si)[0]
+            if len(local_mask) < N_SUB_MIN:
+                continue
+            sidx      = kidx[local_mask]
+            top_idx_s = Hs[si].argsort()[::-1][:N_LABEL_TERMS]
+            sterms    = [fn_sub[i] for i in top_idx_s]
+            sub_entries.append({"label":     f"J{rank}{chr(ord('a') + si)}",
+                                 "idx":       sidx,
+                                 "top_terms": sterms})
+        if len(sub_entries) < 2:
+            continue
+        jr["sub_jets"] = sub_entries
+        print(f"  J{rank}: {len(sub_entries)} NMF sub-topics")
+        for e in sub_entries:
+            print(f"    {e['label']}: n={len(e['idx'])}  [{', '.join(e['top_terms'])}]")
+            sjet_csv = df_full.iloc[e["idx"]].copy()
+            sjet_csv["umap_x"] = xy_all[e["idx"], 0]
+            sjet_csv["umap_y"] = xy_all[e["idx"], 1]
+            sjet_csv["pt"]     = pts[e["idx"]]
+            sjet_csv.to_csv(cout(f"{e['label']}.csv"), index=False)
+
+    return jet_results, all_raw_indices
+
+
+# ---------------------------------------------------------------------------
 # Color helpers  (mirrors topic_discovery.py)
 # ---------------------------------------------------------------------------
 
@@ -571,7 +784,7 @@ def _find_highlighted(df_full):
 # Final composite plot
 # ---------------------------------------------------------------------------
 
-def final_plot(xy_all, df_full, jet_results, all_raw_indices):
+def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
     """
     Parameters
     ----------
@@ -727,11 +940,14 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices):
                   fontsize=8, frameon=True, framealpha=0.85,
                   title="Highlighted", title_fontsize=8)
 
-    title = (f"Jet-physics topic map — arXiv jet corpus\n"
-             f"C/A  R={R_JET}  (p={P_EXPONENT})   |   "
-             f"SoftDrop  z_cut={Z_CUT}  β={BETA}   |   "
-             f"sub-jet  R={R_SUB}")
-    ax.set_title(title, fontsize=11)
+    if plot_title is None:
+        algo = {0: "Cambridge/Aachen", 1: "kt", -1: "anti-kt"}.get(
+            P_EXPONENT, f"gen-kt(p={P_EXPONENT})")
+        plot_title = (f"Jet-physics topic map — arXiv jet corpus\n"
+                      f"{algo}  R={R_JET}  (p={P_EXPONENT})   |   "
+                      f"SoftDrop  z_cut={Z_CUT}  β={BETA}   |   "
+                      f"sub-jet  R={R_SUB}")
+    ax.set_title(plot_title, fontsize=11)
     ax.set_xlabel("UMAP-1")
     ax.set_ylabel("UMAP-2")
     fig.tight_layout()
@@ -748,6 +964,7 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices):
 def main():
     global P_EXPONENT, R_JET, R_SUB, MIN_JET_PAPERS, Z_CUT, BETA
     global N_PLOT_JETS, N_LABEL_TERMS, N_SUB_MIN, OUTPUT_DIR, REUSE_UMAP
+    global CLUSTERING_METHOD
 
     args = _parse_args()
     P_EXPONENT    = args.p_exponent
@@ -762,6 +979,7 @@ def main():
     OUTPUT_DIR    = args.output_dir
     if args.no_reuse_umap:
         REUSE_UMAP = False
+    CLUSTERING_METHOD = args.clustering
 
     print(f"Config: p={P_EXPONENT}  R_jet={R_JET}  R_sub={R_SUB}  "
           f"z_cut={Z_CUT}  beta={BETA}  N_jets={N_PLOT_JETS}  "
@@ -803,139 +1021,152 @@ def main():
         umap_out.to_csv(umap_path, index=False)
         print(f"[UMAP] Coordinates saved → {umap_path}")
 
-    # =========================================================================
-    # PASS 1 — generalized-kt clustering (C/A by default)
-    # =========================================================================
-    print("\n" + "#" * 70)
-    algo = {0: "Cambridge/Aachen", 1: "kt", -1: "anti-kt"}.get(P_EXPONENT,
-           f"gen-kt(p={P_EXPONENT})")
-    print(f"# PASS 1 — {algo}  R={R_JET}")
-    print("#" * 70)
+    if CLUSTERING_METHOD == "genkt":
+        # =====================================================================
+        # PASS 1 — generalized-kt clustering
+        # =====================================================================
+        print("\n" + "#" * 70)
+        algo = {0: "Cambridge/Aachen", 1: "kt", -1: "anti-kt"}.get(P_EXPONENT,
+               f"gen-kt(p={P_EXPONENT})")
+        print(f"# PASS 1 — {algo}  R={R_JET}")
+        print("#" * 70)
 
-    pseudojets = [PseudoJet(pts[i], xs[i], ys[i], [i]) for i in range(len(df_full))]
-    print(f"  Clustering {len(pseudojets)} papers ...")
-    raw_jets = generalized_kt(pseudojets, R=R_JET, p=P_EXPONENT)
-    raw_jets.sort(key=lambda j: len(j.indices), reverse=True)
-    print(f"  → {len(raw_jets)} raw jets")
-    for k, j in enumerate(raw_jets[:8]):
-        print(f"    J{k}: n={len(j.indices)}  pt={j.pt:.1f}")
+        pseudojets = [PseudoJet(pts[i], xs[i], ys[i], [i]) for i in range(len(df_full))]
+        print(f"  Clustering {len(pseudojets)} papers ...")
+        raw_jets = generalized_kt(pseudojets, R=R_JET, p=P_EXPONENT)
+        raw_jets.sort(key=lambda j: len(j.indices), reverse=True)
+        print(f"  → {len(raw_jets)} raw jets")
+        for k, j in enumerate(raw_jets[:8]):
+            print(f"    J{k}: n={len(j.indices)}  pt={j.pt:.1f}")
 
-    # Global index set of all papers that ended up in any jet
-    all_raw_indices = set()
-    for j in raw_jets:
-        all_raw_indices.update(j.indices)
-    beam_count = len(df_full) - len(all_raw_indices)
-    print(f"  → {beam_count} beam remnants (single-paper jets outside R={R_JET})")
+        all_raw_indices = set()
+        for j in raw_jets:
+            all_raw_indices.update(j.indices)
+        beam_count = len(df_full) - len(all_raw_indices)
+        print(f"  → {beam_count} beam remnants (single-paper jets outside R={R_JET})")
 
-    # =========================================================================
-    # PASS 2 — SoftDrop grooming
-    # =========================================================================
-    print("\n" + "#" * 70)
-    print(f"# PASS 2 — SoftDrop grooming  z_cut={Z_CUT}  β={BETA}  R₀={R_JET}")
-    print("#" * 70)
+        # =====================================================================
+        # PASS 2 — SoftDrop grooming
+        # =====================================================================
+        print("\n" + "#" * 70)
+        print(f"# PASS 2 — SoftDrop grooming  z_cut={Z_CUT}  β={BETA}  R₀={R_JET}")
+        print("#" * 70)
 
-    jet_results = []
-    for k, jet in enumerate(raw_jets):
-        kept_idx    = np.array(softdrop_indices(jet, Z_CUT, BETA, R_JET), dtype=int)
-        all_idx     = np.array(jet.indices, dtype=int)
-        dropped_idx = np.setdiff1d(all_idx, kept_idx)
-        frac        = len(kept_idx) / max(len(all_idx), 1) * 100
-        print(f"  J{k}: {len(all_idx):4d} → {len(kept_idx):4d} kept  "
-              f"({len(dropped_idx)} groomed,  {frac:.0f}%)")
+        jet_results = []
+        for k, jet in enumerate(raw_jets):
+            kept_idx    = np.array(softdrop_indices(jet, Z_CUT, BETA, R_JET), dtype=int)
+            all_idx     = np.array(jet.indices, dtype=int)
+            dropped_idx = np.setdiff1d(all_idx, kept_idx)
+            frac        = len(kept_idx) / max(len(all_idx), 1) * 100
+            print(f"  J{k}: {len(all_idx):4d} → {len(kept_idx):4d} kept  "
+                  f"({len(dropped_idx)} groomed,  {frac:.0f}%)")
 
-        if len(kept_idx) < MIN_JET_PAPERS:
-            print(f"       below MIN_JET_PAPERS={MIN_JET_PAPERS}, skipping")
-            continue
+            if len(kept_idx) < MIN_JET_PAPERS:
+                print(f"       below MIN_JET_PAPERS={MIN_JET_PAPERS}, skipping")
+                continue
 
-        jet_results.append({
-            "all_idx":     all_idx,
-            "kept_idx":    kept_idx,
-            "dropped_idx": dropped_idx,
-            "top_terms":   [],   # filled below after all jets are known
-            "sub_jets":    [],
-        })
+            jet_results.append({
+                "all_idx":     all_idx,
+                "kept_idx":    kept_idx,
+                "dropped_idx": dropped_idx,
+                "top_terms":   [],
+                "sub_jets":    [],
+            })
 
-    # Sort by groomed-jet size and assign ranks
-    jet_results.sort(key=lambda jr: len(jr["kept_idx"]), reverse=True)
-    for rank, jr in enumerate(jet_results):
-        jr["jet_idx"] = rank
+        jet_results.sort(key=lambda jr: len(jr["kept_idx"]), reverse=True)
+        for rank, jr in enumerate(jet_results):
+            jr["jet_idx"] = rank
 
-    # Discriminative labels across all jets (IDF penalises terms common to many jets)
-    jet_dfs   = [df_full.iloc[jr["kept_idx"]].reset_index(drop=True) for jr in jet_results]
-    jet_terms = extract_discriminative_labels(jet_dfs)
-    for jr, terms in zip(jet_results, jet_terms):
-        jr["top_terms"] = terms
+        jet_dfs   = [df_full.iloc[jr["kept_idx"]].reset_index(drop=True) for jr in jet_results]
+        jet_terms = extract_discriminative_labels(jet_dfs)
+        for jr, terms in zip(jet_results, jet_terms):
+            jr["top_terms"] = terms
 
-    print(f"\n  {len(jet_results)} jets survive grooming + size threshold")
-    for jr in jet_results:
-        print(f"    J{jr['jet_idx']}: n={len(jr['kept_idx'])}  [{', '.join(jr['top_terms'])}]")
+        print(f"\n  {len(jet_results)} jets survive grooming + size threshold")
+        for jr in jet_results:
+            print(f"    J{jr['jet_idx']}: n={len(jr['kept_idx'])}  [{', '.join(jr['top_terms'])}]")
 
-    # Keep only the top N_PLOT_JETS for plotting and sub-clustering
-    jet_results = jet_results[:N_PLOT_JETS]
-    print(f"  → plotting top {len(jet_results)} jets (N_PLOT_JETS={N_PLOT_JETS})")
+        jet_results = jet_results[:N_PLOT_JETS]
+        print(f"  → plotting top {len(jet_results)} jets (N_PLOT_JETS={N_PLOT_JETS})")
 
-    for jr in jet_results:
-        rank  = jr["jet_idx"]
-        jet_csv = df_full.iloc[jr["kept_idx"]].copy()
-        jet_csv["umap_x"] = xs[jr["kept_idx"]]
-        jet_csv["umap_y"] = ys[jr["kept_idx"]]
-        jet_csv["pt"]     = pts[jr["kept_idx"]]
-        jet_csv.to_csv(cout(f"J{rank}.csv"), index=False)
+        for jr in jet_results:
+            rank  = jr["jet_idx"]
+            jet_csv = df_full.iloc[jr["kept_idx"]].copy()
+            jet_csv["umap_x"] = xs[jr["kept_idx"]]
+            jet_csv["umap_y"] = ys[jr["kept_idx"]]
+            jet_csv["pt"]     = pts[jr["kept_idx"]]
+            jet_csv.to_csv(cout(f"J{rank}.csv"), index=False)
 
-    # Save all groomed-out papers (SoftDrop drops + beam remnants) to one CSV
-    all_dropped = set()
-    for jr in jet_results:
-        all_dropped.update(jr["dropped_idx"].tolist())
-    beam_idx = [i for i in range(len(df_full)) if i not in all_raw_indices]
-    groomed_idx = np.array(sorted(all_dropped) + beam_idx, dtype=int)
-    groomed_csv = df_full.iloc[groomed_idx].copy()
-    groomed_csv["umap_x"] = xs[groomed_idx]
-    groomed_csv["umap_y"] = ys[groomed_idx]
-    groomed_csv["pt"]     = pts[groomed_idx]
-    groomed_path = out("groomed_papers.csv")
-    groomed_csv.to_csv(groomed_path, index=False)
-    print(f"  Groomed / beam-remnant papers ({len(groomed_idx)}) → {groomed_path}")
+        all_dropped = set()
+        for jr in jet_results:
+            all_dropped.update(jr["dropped_idx"].tolist())
+        beam_idx = [i for i in range(len(df_full)) if i not in all_raw_indices]
+        groomed_idx = np.array(sorted(all_dropped) + beam_idx, dtype=int)
+        groomed_csv = df_full.iloc[groomed_idx].copy()
+        groomed_csv["umap_x"] = xs[groomed_idx]
+        groomed_csv["umap_y"] = ys[groomed_idx]
+        groomed_csv["pt"]     = pts[groomed_idx]
+        groomed_path = out("groomed_papers.csv")
+        groomed_csv.to_csv(groomed_path, index=False)
+        print(f"  Groomed / beam-remnant papers ({len(groomed_idx)}) → {groomed_path}")
 
-    # =========================================================================
-    # PASS 3 — sub-clustering within each top jet  (R = R_SUB)
-    # =========================================================================
-    print("\n" + "#" * 70)
-    print(f"# PASS 3 — sub-clustering {len(jet_results)} plotted jets  R={R_SUB}")
-    print("#" * 70)
+        # =====================================================================
+        # PASS 3 — sub-clustering within each top jet  (R = R_SUB)
+        # =====================================================================
+        print("\n" + "#" * 70)
+        print(f"# PASS 3 — sub-clustering {len(jet_results)} plotted jets  R={R_SUB}")
+        print("#" * 70)
 
-    for jr in jet_results:
-        kidx  = jr["kept_idx"]
-        rank  = jr["jet_idx"]
-        print(f"\n  J{rank}  n={len(kidx)}")
+        for jr in jet_results:
+            kidx  = jr["kept_idx"]
+            rank  = jr["jet_idx"]
+            print(f"\n  J{rank}  n={len(kidx)}")
 
-        sub_pjs = [PseudoJet(pts[i], xs[i], ys[i], [i]) for i in kidx]
-        sub_raw = generalized_kt(sub_pjs, R=R_SUB, p=P_EXPONENT)
-        sub_raw = [sj for sj in sub_raw if len(sj.indices) >= N_SUB_MIN]
-        sub_raw.sort(key=lambda sj: len(sj.indices), reverse=True)
+            sub_pjs = [PseudoJet(pts[i], xs[i], ys[i], [i]) for i in kidx]
+            sub_raw = generalized_kt(sub_pjs, R=R_SUB, p=P_EXPONENT)
+            sub_raw = [sj for sj in sub_raw if len(sj.indices) >= N_SUB_MIN]
+            sub_raw.sort(key=lambda sj: len(sj.indices), reverse=True)
 
-        if len(sub_raw) < 2:
-            print(f"  J{rank}: only {len(sub_raw)} qualifying sub-jet(s) — skipping")
-            continue
+            if len(sub_raw) < 2:
+                print(f"  J{rank}: only {len(sub_raw)} qualifying sub-jet(s) — skipping")
+                continue
 
-        # Collect all sub-jets first, then compute discriminative labels in one shot
-        sub_entries = []
-        for si, sj in enumerate(sub_raw):
-            sidx  = np.array(sj.indices, dtype=int)
-            label = f"J{rank}{chr(ord('a') + si)}"
-            sub_entries.append({"label": label, "idx": sidx})
+            sub_entries = []
+            for si, sj in enumerate(sub_raw):
+                sidx  = np.array(sj.indices, dtype=int)
+                label = f"J{rank}{chr(ord('a') + si)}"
+                sub_entries.append({"label": label, "idx": sidx})
 
-        sub_dfs   = [df_full.iloc[e["idx"]].reset_index(drop=True) for e in sub_entries]
-        sub_terms = extract_discriminative_labels(sub_dfs)
+            sub_dfs   = [df_full.iloc[e["idx"]].reset_index(drop=True) for e in sub_entries]
+            sub_terms = extract_discriminative_labels(sub_dfs)
 
-        for entry, sterms in zip(sub_entries, sub_terms):
-            entry["top_terms"] = sterms
-            jr["sub_jets"].append(entry)
-            print(f"    {entry['label']}: n={len(entry['idx']):4d}  [{', '.join(sterms)}]")
-            sjet_csv = df_full.iloc[entry["idx"]].copy()
-            sjet_csv["umap_x"] = xs[entry["idx"]]
-            sjet_csv["umap_y"] = ys[entry["idx"]]
-            sjet_csv["pt"]     = pts[entry["idx"]]
-            sjet_csv.to_csv(cout(f"{entry['label']}.csv"), index=False)
+            for entry, sterms in zip(sub_entries, sub_terms):
+                entry["top_terms"] = sterms
+                jr["sub_jets"].append(entry)
+                print(f"    {entry['label']}: n={len(entry['idx']):4d}  [{', '.join(sterms)}]")
+                sjet_csv = df_full.iloc[entry["idx"]].copy()
+                sjet_csv["umap_x"] = xs[entry["idx"]]
+                sjet_csv["umap_y"] = ys[entry["idx"]]
+                sjet_csv["pt"]     = pts[entry["idx"]]
+                sjet_csv.to_csv(cout(f"{entry['label']}.csv"), index=False)
+
+        plot_title = None  # use default (genkt) title
+
+    elif CLUSTERING_METHOD == "agglomerative":
+        print("\n" + "#" * 70)
+        print("# Agglomerative clustering (alternative to jet algorithm)")
+        print("#" * 70)
+        jet_results, all_raw_indices = run_agglomerative_pipeline(df_full, xy_all, pts)
+        plot_title = ("Topic map — arXiv jet corpus  "
+                      f"(Agglomerative + SPECTER2  |  n_jets={N_PLOT_JETS})")
+
+    else:  # nmf
+        print("\n" + "#" * 70)
+        print("# NMF topic modeling (alternative to jet algorithm)")
+        print("#" * 70)
+        jet_results, all_raw_indices = run_nmf_pipeline(df_full, xy_all, pts)
+        plot_title = ("Topic map — arXiv jet corpus  "
+                      f"(NMF + SPECTER2  |  n_topics={N_PLOT_JETS})")
 
     # =========================================================================
     # FINAL PLOT
@@ -944,7 +1175,7 @@ def main():
     print("# Final composite plot")
     print("#" * 70)
 
-    final_plot(xy_all, df_full, jet_results, all_raw_indices)
+    final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title)
 
 
 if __name__ == "__main__":

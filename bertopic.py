@@ -20,8 +20,14 @@ Usage:
     python topic_discovery.py
 """
 
-import sys, os, warnings
+import sys, os, warnings, argparse
 from dataclasses import dataclass, field
+
+# Remove this file's own directory from sys.path so "from bertopic import BERTopic"
+# resolves to the installed package and not this script.
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path = [p for p in sys.path if os.path.abspath(p) != _here]
+
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
@@ -30,8 +36,10 @@ warnings.filterwarnings("ignore")
 INPUT_CSV         = "arxiv_jet_papers.csv"
 OUTPUT_DIR        = "output_bert"
 CLUSTERS_DIR      = os.path.join(OUTPUT_DIR, "clusters")
+REUSE_UMAP        = True
 
-EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL   = "allenai/specter2_base"
+CLUSTERING_METHOD = "hdbscan"
 MIN_TOPIC_SIZE    = 4
 N_REPRESENTATIVE  = 3
 N_TOP_CLUSTERS    = 4     # how many Pass-3 clusters to recurse into
@@ -99,6 +107,28 @@ EXTRA_STOPWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="Hierarchical topic discovery on arXiv jet-physics papers.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--input-csv",     type=str,   default=INPUT_CSV,        help="Input CSV file")
+    p.add_argument("--output-dir",    type=str,   default=OUTPUT_DIR,       help="Output directory")
+    p.add_argument("--n-top",         type=int,   default=N_TOP_CLUSTERS,   help="Top N clusters to recurse into")
+    p.add_argument("--pass1-topics",  type=int,   default=PASS1_NR_TOPICS,  help="Nr topics for Pass 1")
+    p.add_argument("--pass3-topics",  type=int,   default=PASS3_NR_TOPICS,  help="Nr topics for Pass 3")
+    p.add_argument("--pass4-topics",  type=int,   default=PASS4_NR_TOPICS,  help="Nr topics for Pass 4")
+    p.add_argument("--radius",        type=float, default=RADIUS_THRESHOLD, help="UMAP radius threshold for splitting")
+    p.add_argument("--max-depth",     type=int,   default=MAX_CLUSTER_DEPTH, help="Max recursion depth")
+    p.add_argument("--min-topic-size", type=int,  default=MIN_TOPIC_SIZE,   help="Min papers per topic")
+    p.add_argument("--no-reuse-umap", action="store_true",                  help="Force UMAP recomputation")
+    p.add_argument("--clustering",    type=str,   default="hdbscan",
+               choices=["hdbscan", "agglomerative", "nmf"],
+               help="Clustering algorithm")
+    return p.parse_args()
+
+
 import pandas as pd
 import numpy as np
 
@@ -204,40 +234,117 @@ def _is_offtopic(representation):
     return any(kw in rep for kw in OFFTOPIC_KEYWORDS)
 
 
+class NMFTopicModel:
+    """Thin BERTopic-compatible wrapper around sklearn NMF.
+
+    Provides the subset of BERTopic interface used by this script:
+    topics_, topic_labels_, get_topic_info(), get_representative_docs(),
+    reduce_topics() (no-op — components are fixed at fit time).
+    """
+
+    def __init__(self):
+        self.topics_       = []
+        self.topic_labels_ = {}
+        self._info         = None
+        self._rep_docs     = {}
+
+    def fit(self, docs, nr_topics):
+        from sklearn.decomposition import NMF
+        from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+        from collections import Counter
+
+        sw  = list(ENGLISH_STOP_WORDS) + EXTRA_STOPWORDS
+        mdf = 1 if len(docs) < 30 else 2
+        vec = TfidfVectorizer(stop_words=sw, ngram_range=(1, 2),
+                              max_features=5000, min_df=mdf)
+        X   = vec.fit_transform(docs)
+        n   = max(2, min(nr_topics, X.shape[0] - 1, X.shape[1] - 1))
+
+        nmf = NMF(n_components=n, random_state=42, max_iter=500)
+        W   = nmf.fit_transform(X)
+        H   = nmf.components_
+        fn  = vec.get_feature_names_out()
+
+        self.topics_ = list(W.argmax(axis=1).astype(int))
+        cnt  = Counter(self.topics_)
+        rows = []
+        for tid in range(len(H)):
+            top_idx = H[tid].argsort()[::-1][:10]
+            terms   = [fn[i] for i in top_idx]
+            rows.append({"Topic": tid, "Count": cnt.get(tid, 0),
+                         "Representation": terms})
+            self.topic_labels_[tid] = "_".join(terms[:3])
+        self._info = pd.DataFrame(rows)
+
+        for tid in range(len(H)):
+            top_k = W[:, tid].argsort()[::-1][:N_REPRESENTATIVE]
+            self._rep_docs[tid] = [docs[i] for i in top_k]
+        return self
+
+    def get_topic_info(self):
+        return self._info.copy()
+
+    def get_representative_docs(self, tid):
+        return self._rep_docs.get(tid, [])
+
+    def reduce_topics(self, docs, nr_topics):
+        pass
+
+
 def run_bertopic(embeddings, docs, nr_topics, label, min_topic_size=None):
-    """Cluster pre-computed embeddings with BERTopic, merge to nr_topics."""
+    """Cluster docs. Algorithm controlled by global CLUSTERING_METHOD."""
     from bertopic import BERTopic
     from bertopic.vectorizers import ClassTfidfTransformer
     from sentence_transformers import SentenceTransformer
     from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
     from umap import UMAP
-    import hdbscan
 
     mts = min_topic_size or MIN_TOPIC_SIZE
-    print(f"\n[{label}] Clustering {len(docs)} docs (min_topic_size={mts}) ...")
+    print(f"\n[{label}] Clustering {len(docs)} docs "
+          f"(method={CLUSTERING_METHOD}, min_topic_size={mts}) ...")
+
+    if CLUSTERING_METHOD == "nmf":
+        m = NMFTopicModel().fit(docs, nr_topics)
+        print(f"[{label}] NMF: {len(m.get_topic_info())} topics")
+        return m
 
     umap_model = UMAP(n_neighbors=min(UMAP_N_NEIGHBORS, len(docs) - 2),
                       n_components=min(UMAP_N_COMPONENTS, len(docs) - 2),
                       metric=UMAP_METRIC, random_state=42, low_memory=False)
-    hdb_model  = hdbscan.HDBSCAN(min_cluster_size=mts, metric="euclidean",
-                                  cluster_selection_method="eom", prediction_data=True)
     all_sw     = list(ENGLISH_STOP_WORDS) + EXTRA_STOPWORDS
     min_df     = 1 if len(docs) < 30 else 2
     vectorizer = CountVectorizer(stop_words=all_sw, ngram_range=(1, 2), min_df=min_df)
     ctfidf     = ClassTfidfTransformer(reduce_frequent_words=True)
 
-    model = BERTopic(embedding_model=SentenceTransformer(EMBEDDING_MODEL),
-                     umap_model=umap_model, hdbscan_model=hdb_model,
-                     vectorizer_model=vectorizer, ctfidf_model=ctfidf,
-                     calculate_probabilities=False, verbose=False)
-
-    model.fit_transform(docs, embeddings=embeddings)
-
-    actual_topics = len(model.get_topic_info()) - 1  # exclude -1
-    target = min(nr_topics, max(actual_topics, 1))
-    if actual_topics > target:
-        print(f"[{label}] Merging {actual_topics} → {target} topics ...")
-        model.reduce_topics(docs, nr_topics=target)
+    if CLUSTERING_METHOD == "agglomerative":
+        from sklearn.cluster import AgglomerativeClustering
+        n_cl          = max(2, min(nr_topics, len(docs) - 1))
+        cluster_model = AgglomerativeClustering(n_clusters=n_cl)
+        model = BERTopic(
+            embedding_model=SentenceTransformer(EMBEDDING_MODEL),
+            umap_model=umap_model, hdbscan_model=cluster_model,
+            vectorizer_model=vectorizer, ctfidf_model=ctfidf,
+            calculate_probabilities=False, verbose=False,
+        )
+        model.fit_transform(docs, embeddings=embeddings)
+        print(f"[{label}] Agglomerative: {n_cl} clusters")
+    else:
+        import hdbscan as _hdbscan
+        hdb_model = _hdbscan.HDBSCAN(min_cluster_size=mts, metric="euclidean",
+                                      cluster_selection_method="eom",
+                                      prediction_data=True)
+        model = BERTopic(
+            embedding_model=SentenceTransformer(EMBEDDING_MODEL),
+            umap_model=umap_model, hdbscan_model=hdb_model,
+            vectorizer_model=vectorizer, ctfidf_model=ctfidf,
+            calculate_probabilities=False, verbose=False,
+        )
+        model.fit_transform(docs, embeddings=embeddings)
+        actual = len(model.get_topic_info()) - 1
+        target = min(nr_topics, max(actual, 1))
+        if actual > target:
+            print(f"[{label}] Merging {actual} → {target} topics ...")
+            model.reduce_topics(docs, nr_topics=target)
 
     return model
 
@@ -569,6 +676,26 @@ def final_plot(xy_all, df_full, groomed_mask, pass3_topics, pass4_trees, ti3):
 # ---------------------------------------------------------------------------
 
 def main():
+    global INPUT_CSV, OUTPUT_DIR, CLUSTERS_DIR
+    global N_TOP_CLUSTERS, PASS1_NR_TOPICS, PASS3_NR_TOPICS, PASS4_NR_TOPICS
+    global RADIUS_THRESHOLD, MAX_CLUSTER_DEPTH, MIN_TOPIC_SIZE, REUSE_UMAP
+    global CLUSTERING_METHOD
+
+    args = _parse_args()
+    INPUT_CSV         = args.input_csv
+    OUTPUT_DIR        = args.output_dir
+    CLUSTERS_DIR      = os.path.join(OUTPUT_DIR, "clusters")
+    N_TOP_CLUSTERS    = args.n_top
+    PASS1_NR_TOPICS   = args.pass1_topics
+    PASS3_NR_TOPICS   = args.pass3_topics
+    PASS4_NR_TOPICS   = args.pass4_topics
+    RADIUS_THRESHOLD  = args.radius
+    MAX_CLUSTER_DEPTH = args.max_depth
+    MIN_TOPIC_SIZE    = args.min_topic_size
+    if args.no_reuse_umap:
+        REUSE_UMAP = False
+    CLUSTERING_METHOD  = args.clustering
+
     df_full   = load_corpus(INPUT_CSV)
     docs_full = df_full["text"].tolist()
 
