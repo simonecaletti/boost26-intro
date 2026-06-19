@@ -34,15 +34,15 @@ CLUSTERS_DIR      = os.path.join(OUTPUT_DIR, "clusters")
 EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
 MIN_TOPIC_SIZE    = 4
 N_REPRESENTATIVE  = 3
-N_TOP_CLUSTERS    = 5     # how many Pass-3 clusters to recurse into
+N_TOP_CLUSTERS    = 4     # how many Pass-3 clusters to recurse into
 
 PASS1_NR_TOPICS   = 15
 PASS3_NR_TOPICS   = 12
 PASS4_NR_TOPICS   = 8     # target topics at each recursion level
 
 # Recursion stopping criteria
-RADIUS_THRESHOLD  = 0.8   # mean UMAP distance from centroid; split if larger
-MAX_CLUSTER_DEPTH = 3     # maximum depth below Pass-3 (1 = old single-level behaviour)
+RADIUS_THRESHOLD  = 0.6   # mean UMAP distance from centroid; split if larger
+MAX_CLUSTER_DEPTH = 4     # maximum depth below Pass-3 (1 = old single-level behaviour)
 
 # Topics whose top terms match any of these are groomed out after Pass 1
 OFFTOPIC_KEYWORDS = [
@@ -55,8 +55,20 @@ UMAP_N_NEIGHBORS  = 15
 UMAP_N_COMPONENTS = 5    # for clustering
 UMAP_METRIC       = "cosine"
 
-# Base colors for Pass-3 top clusters (one per cluster, up to N_TOP_CLUSTERS)
-CLUSTER_COLORS = ["#e41a1c", "#377eb8", "#4daf4a", "#ff7f00", "#984ea3"]
+# Seed colors for Pass-3 top clusters — extended automatically for any N via HSV wheel
+_CLUSTER_COLORS_SEED = ["#e41a1c", "#377eb8", "#4daf4a", "#ff7f00", "#984ea3",
+                        "#a65628", "#f781bf", "#999999", "#66c2a5", "#fc8d62"]
+
+def _cluster_colors(n):
+    """Return n visually distinct colors, using the seed palette first then HSV wheel."""
+    import colorsys
+    colors = list(_CLUSTER_COLORS_SEED)
+    while len(colors) < n:
+        i = len(colors)
+        h = (i * 0.618033988749895) % 1.0   # golden-ratio hue spacing
+        r, g, b = colorsys.hsv_to_rgb(h, 0.75, 0.85)
+        colors.append(f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}")
+    return colors[:n]
 
 N_LABEL_TERMS = 3   # how many top BERTopic terms to show as the cluster name
 
@@ -210,7 +222,8 @@ def run_bertopic(embeddings, docs, nr_topics, label, min_topic_size=None):
     hdb_model  = hdbscan.HDBSCAN(min_cluster_size=mts, metric="euclidean",
                                   cluster_selection_method="eom", prediction_data=True)
     all_sw     = list(ENGLISH_STOP_WORDS) + EXTRA_STOPWORDS
-    vectorizer = CountVectorizer(stop_words=all_sw, ngram_range=(1, 2), min_df=2)
+    min_df     = 1 if len(docs) < 30 else 2
+    vectorizer = CountVectorizer(stop_words=all_sw, ngram_range=(1, 2), min_df=min_df)
     ctfidf     = ClassTfidfTransformer(reduce_frequent_words=True)
 
     model = BERTopic(embedding_model=SentenceTransformer(EMBEDDING_MODEL),
@@ -411,7 +424,8 @@ def final_plot(xy_all, df_full, groomed_mask, pass3_topics, pass4_trees, ti3):
 
     top_ids   = top_n_topics(ti3, N_TOP_CLUSTERS)
     rank_of   = {tid: rank for rank, tid in enumerate(top_ids)}
-    color_for = {tid: CLUSTER_COLORS[rank_of[tid]] for tid in top_ids}
+    palette   = _cluster_colors(len(top_ids))
+    color_for = {tid: palette[rank_of[tid]] for tid in top_ids}
 
     # Pre-compute highlighted paper indices
     highlights = _find_highlighted(df_full) if HIGHLIGHT_PAPERS else []
