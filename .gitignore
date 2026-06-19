@@ -1,3 +1,5 @@
 CLAUDE.md 
+.claude/** 
 output_bert/**
 output_genkt/**
+__pycache__
