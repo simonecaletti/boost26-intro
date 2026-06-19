@@ -42,21 +42,21 @@ EMBEDDING_MODEL  = "all-MiniLM-L6-v2"
 # Generalized-kt exponent: p=0 → C/A, p=1 → kt, p=-1 → anti-kt
 # anti-kt (p=-1) builds jets outward from the hardest (most on-topic) papers,
 # giving compact, well-defined topic cores — best for finding the 5 target regions.
-P_EXPONENT       = 1
-R_JET            = 2.0   # Pass-1 jet radius in UMAP units; ~2 gives ~5-8 large jets
-R_SUB            = 0.8   # Pass-3 sub-jet radius
+P_EXPONENT       = -1.0
+R_JET            = 1.0   # Pass-1 jet radius in UMAP units; ~2 gives ~5-8 large jets
+R_SUB            = 0.6   # Pass-3 sub-jet radius
 MIN_JET_PAPERS   = 8     # discard jets smaller than this after grooming
 
 # SoftDrop parameters
 # z_cut=0.15 with beta=0 (mass-drop-like) aggressively drops low-pt papers;
 # beta=1 is softer grooming — keep at 0.1 to preserve borderline papers.
-Z_CUT            = 0.3
-BETA             = -1.0   # beta=0: pure z-cut (mass-drop grooming), angle-independent
+Z_CUT            = 0.3 
+BETA             = 2.0   # beta=0: pure z-cut (mass-drop grooming), angle-independent
 
 # Minimum pt (avoids zero/negative issues in the clustering distances)
 PT_EPSILON       = 0.1
 
-N_TOP_JETS       = 5     # how many groomed jets to sub-cluster in Pass 3
+N_PLOT_JETS      = 7     # how many jets to plot AND sub-cluster (top N by size)
 N_LABEL_TERMS    = 3     # TF-IDF terms shown as jet/sub-jet label
 N_SUB_MIN        = 3     # minimum papers per sub-jet to keep it
 
@@ -101,7 +101,7 @@ OFFTOPIC_KEYWORDS = [
     "quenching weight", "nuclear modification",
     # extra 
     "majorana", "hyperons", "instantons", "ray", "reheating", 
-    "inflation", "inflaton", "ell",
+    "inflation", "inflaton",
 ]
 
 # Seed colors — extended automatically via golden-ratio HSV wheel
@@ -110,6 +110,7 @@ _JET_COLORS_SEED = ["#e41a1c", "#377eb8", "#4daf4a", "#ff7f00", "#984ea3",
 
 HIGHLIGHT_PAPERS = [
     ("Lund b-jet plane (Ghira et al.)", "2512.17408"),
+    ("epemZH (Caletti et al.)","2510.20485"),
 ]
 HIGHLIGHT_COLORS = ["#ff1493", "#00ced1", "#ffd700", "#39ff14", "#ff6600"]
 
@@ -129,6 +130,9 @@ EXTRA_STOPWORDS = [
     "recent", "known", "new", "arxiv", "preprint", "physical", "review",
     "letter", "letters", "journal", "proceedings", "mathrm", "pb",
     "scriptscriptstyle", "_s rightarrow", "pm0", "d_s", "p_", "tev",
+    "jet", "twist", "soft", "tau", "bar", "leading", "jets", "gluon",
+    "proton", "quark", "density", "densities","collisions", "ell", 
+    "mathcal", "tensor", "hat", "system", "flow"
 ]
 
 # ---------------------------------------------------------------------------
@@ -174,23 +178,55 @@ def load_corpus(path):
 
 def compute_pt(df):
     """
-    pt(paper) = Σ occurrences(ONTOPIC_KEYWORDS)  −  Σ occurrences(OFFTOPIC_KEYWORDS)
-    Floored at PT_EPSILON so no paper has zero or negative pt.
-    Papers that score PT_EPSILON are "soft" and will be easily groomed away.
+    IDF-weighted keyword scoring.
+
+    For each keyword kw, compute:
+        idf(kw) = log(N / (1 + df(kw)))
+    where df(kw) = number of papers containing kw at least once.
+
+    Then for each paper:
+        pt = Σ count(kw) × idf(kw)   for kw in ONTOPIC_KEYWORDS
+           − Σ count(kw) × idf(kw)   for kw in OFFTOPIC_KEYWORDS
+        pt = max(PT_EPSILON, pt)
+
+    Generic keywords that appear in most papers (low IDF) contribute little;
+    specific keywords found in few papers (high IDF) dominate the score.
     """
     import re
-    pts = np.zeros(len(df))
-    for i, (_, row) in enumerate(df.iterrows()):
-        text  = row["text"].lower()
+    N      = len(df)
+    texts  = [row["text"].lower() for _, row in df.iterrows()]
+    pats   = {kw: re.compile(r'\b' + re.escape(kw) + r'\b')
+              for kw in ONTOPIC_KEYWORDS + OFFTOPIC_KEYWORDS}
+
+    # Pass 1 — document frequency per keyword
+    df_kw = {}
+    for kw, pat in pats.items():
+        df_kw[kw] = sum(1 for t in texts if pat.search(t))
+
+    # IDF (add-1 smoothing to avoid division by zero)
+    idf = {kw: np.log(N / (1 + df_kw[kw])) for kw in pats}
+
+    print("[pt] keyword IDF weights (top discriminative):")
+    for kw, w in sorted(idf.items(), key=lambda x: -x[1])[:10]:
+        print(f"      {w:.2f}  '{kw}'  (in {df_kw[kw]} papers)")
+
+    # Pass 2 — score each paper
+    pts = np.zeros(N)
+    for i, text in enumerate(texts):
         score = 0.0
         for kw in ONTOPIC_KEYWORDS:
-            score += len(re.findall(r'\b' + re.escape(kw) + r'\b', text))
+            count = len(pats[kw].findall(text))
+            if count:
+                score += count * idf[kw]
         for kw in OFFTOPIC_KEYWORDS:
-            score -= len(re.findall(r'\b' + re.escape(kw) + r'\b', text))
+            count = len(pats[kw].findall(text))
+            if count:
+                score -= count * idf[kw]
         pts[i] = max(PT_EPSILON, score)
+
     soft = (pts == PT_EPSILON).sum()
-    print(f"[pt] range {pts.min():.1f} – {pts.max():.1f},  "
-          f"mean {pts.mean():.1f},  soft (=ε) papers: {soft}")
+    print(f"[pt] range {pts.min():.2f} – {pts.max():.2f},  "
+          f"mean {pts.mean():.2f},  soft (=ε) papers: {soft}")
     return pts
 
 
@@ -783,9 +819,14 @@ def main():
 
     print(f"\n  {len(jet_results)} jets survive grooming + size threshold")
     for jr in jet_results:
+        print(f"    J{jr['jet_idx']}: n={len(jr['kept_idx'])}  [{', '.join(jr['top_terms'])}]")
+
+    # Keep only the top N_PLOT_JETS for plotting and sub-clustering
+    jet_results = jet_results[:N_PLOT_JETS]
+    print(f"  → plotting top {len(jet_results)} jets (N_PLOT_JETS={N_PLOT_JETS})")
+
+    for jr in jet_results:
         rank  = jr["jet_idx"]
-        terms = ", ".join(jr["top_terms"])
-        print(f"    J{rank}: n={len(jr['kept_idx'])}  [{terms}]")
         jet_csv = df_full.iloc[jr["kept_idx"]].copy()
         jet_csv["umap_x"] = xs[jr["kept_idx"]]
         jet_csv["umap_y"] = ys[jr["kept_idx"]]
@@ -810,10 +851,10 @@ def main():
     # PASS 3 — sub-clustering within each top jet  (R = R_SUB)
     # =========================================================================
     print("\n" + "#" * 70)
-    print(f"# PASS 3 — sub-clustering top-{N_TOP_JETS} jets  R={R_SUB}")
+    print(f"# PASS 3 — sub-clustering {len(jet_results)} plotted jets  R={R_SUB}")
     print("#" * 70)
 
-    for jr in jet_results[:N_TOP_JETS]:
+    for jr in jet_results:
         kidx  = jr["kept_idx"]
         rank  = jr["jet_idx"]
         print(f"\n  J{rank}  n={len(kidx)}")
