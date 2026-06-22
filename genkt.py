@@ -169,6 +169,7 @@ def _parse_args():
     p.add_argument("--n-label",      type=int,   default=N_LABEL_TERMS, help="TF-IDF terms per label")
     p.add_argument("--n-sub-min",    type=int,   default=N_SUB_MIN,    help="Min papers per sub-jet")
     p.add_argument("--output-dir",   type=str,   default=OUTPUT_DIR,   help="Output directory")
+    p.add_argument("--input-csv",    type=str,   default=INPUT_CSV,    help="Input CSV file")
     p.add_argument("--no-reuse-umap", action="store_true",             help="Force UMAP recomputation")
     p.add_argument("--clustering",    type=str,   default="genkt",
                choices=["genkt", "agglomerative", "nmf"],
@@ -988,7 +989,7 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
 def main():
     global P_EXPONENT, R_JET, R_SUB, MIN_JET_PAPERS, Z_CUT, BETA
     global N_PLOT_JETS, N_LABEL_TERMS, N_SUB_MIN, OUTPUT_DIR, REUSE_UMAP
-    global CLUSTERING_METHOD
+    global CLUSTERING_METHOD, INPUT_CSV
 
     args = _parse_args()
     P_EXPONENT    = args.p_exponent
@@ -1001,6 +1002,7 @@ def main():
     N_LABEL_TERMS = args.n_label
     N_SUB_MIN     = args.n_sub_min
     OUTPUT_DIR    = args.output_dir
+    INPUT_CSV     = args.input_csv
     if args.no_reuse_umap:
         REUSE_UMAP = False
     CLUSTERING_METHOD = args.clustering
