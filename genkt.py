@@ -121,6 +121,9 @@ _JET_COLORS_SEED = ["#e41a1c", "#377eb8", "#4daf4a", "#ff7f00", "#984ea3",
 HIGHLIGHT_PAPERS = [
     ("Lund b-jet plane (Ghira et al.)", "2512.17408"),
     ("epemZH (Caletti et al.)","2510.20485"),
+    ("JSS of boosted boson decay with EEC (Lee et al.)", "2601.20933"),
+    ("On thrust resummation in epem (Buonocore et al.)","2603.06091"),
+    ("Centauric 1-Jettiness (Dotson et al.)","2606.20825"),
 ]
 HIGHLIGHT_COLORS = ["#ff1493", "#00ced1", "#ffd700", "#39ff14", "#ff6600"]
 
