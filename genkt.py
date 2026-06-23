@@ -94,6 +94,10 @@ ONTOPIC_KEYWORDS = [
     "soft drop", "softdrop", "lund plane", "n-subjettiness",
     "mass drop", "trimming", "grooming", "angularity",
     "energy correlation", "jet charge", "fat jet", "boosted",
+    # e+e- / thrust resummation cluster
+    "electron-positron", "e+e-", "annihilation", "thrust resummation",
+    # Jettiness / DIS cluster
+    "jettiness", "1-jettiness", "deep inelastic", "dis",
 ]
 
 OFFTOPIC_KEYWORDS = [
@@ -123,7 +127,7 @@ HIGHLIGHT_PAPERS = [
     ("epemZH (Caletti et al.)","2510.20485"),
     ("JSS of boosted boson decay with EEC (Lee et al.)", "2601.20933"),
     ("On thrust resummation in epem (Buonocore et al.)","2603.06091"),
-    ("Centauric 1-Jettiness (Dotson et al.)","2606.20825"),
+    ("Centauric 1-jettiness (Dotson et al.)","2606.20825"),
 ]
 HIGHLIGHT_COLORS = ["#ff1493", "#00ced1", "#ffd700", "#39ff14", "#ff6600"]
 
