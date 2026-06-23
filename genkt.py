@@ -967,7 +967,7 @@ def final_plot(xy_all, df_full, jet_results, all_raw_indices, plot_title=None):
     if plot_title is None:
         algo = {0: "Cambridge/Aachen", 1: "kt", -1: "anti-kt"}.get(
             P_EXPONENT, f"gen-kt(p={P_EXPONENT})")
-        plot_title = (f"Jet-physics topic map — arXiv jet corpus\n"
+        plot_title = (f"'Jet topics' map from arXiv over last year\n"
                       f"{algo}  R={R_JET}  (p={P_EXPONENT})   |   "
                       f"SoftDrop  z_cut={Z_CUT}  β={BETA}   |   "
                       f"sub-jet  R={R_SUB}")
